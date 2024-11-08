@@ -1,2 +1,7 @@
 curl -X POST "http://localhost:8000/transcribe/" -H "x-token: dummytoken123" -F "file=@path_to_your_audio_file.wav"
+
+#### For Malayalam and Another Audio Files 
 curl -X 'POST'   'http://127.0.0.1:8000/filter_transcribe/'   -H 'x-token:dummytoken123'   -F 'file=@/home/asus/Desktop/Whisper/Malayalam.mp3'
+
+#### For Pharshi Audio 
+curl -X POST "http://127.0.0.1:8000/transcribe" -F "file=@/path/to/your/pharshi.mp3"

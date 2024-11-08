@@ -10,6 +10,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.responses import JSONResponse
 from pydub import AudioSegment
 from concurrent.futures import ThreadPoolExecutor
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+import librosa
 
 app = FastAPI()
 
@@ -27,11 +29,13 @@ CHUNK_LENGTH_MS = 60 * 1000  # 60 seconds per chunk
 # Define your expected token
 EXPECTED_TOKEN = "dummytoken123"
 
-# Load the Whisper model (default)
+# Load models
 whisper_model = whisper.load_model("tiny").to(device)
-
-# Load the WhisperX model (for Malayalam)
 whisperx_model = whisperx.load_model("kurianbenoy/vegam-whisper-medium-ml", device, compute_type="float32")
+persian_processor = Wav2Vec2Processor.from_pretrained("jonatasgrosman/wav2vec2-large-xlsr-53-persian")
+persian_model = Wav2Vec2ForCTC.from_pretrained("jonatasgrosman/wav2vec2-large-xlsr-53-persian").to(device)
+maltese_processor = Wav2Vec2Processor.from_pretrained("carlosdanielhernandezmena/wav2vec2-large-xlsr-53-maltese-64h")
+maltese_model = Wav2Vec2ForCTC.from_pretrained("carlosdanielhernandezmena/wav2vec2-large-xlsr-53-maltese-64h").to(device)
 
 # In-memory cache (optional)
 cache = {}
@@ -85,12 +89,21 @@ async def process_audio_in_chunks(file_path, model):
 def process_full_audio(file_path, model):
     """ Transcribe an entire audio file if it's smaller than 25MB. """
     result = model.transcribe(file_path)
+    transcription = " ".join([segment['text'] for segment in result.get('segments', [])])
+    return transcription
+
+def transcribe_with_wav2vec(file_path, processor, model):
+    """Transcribe using Wav2Vec2 for specific languages."""
+    audio, rate = librosa.load(file_path, sr=16000)
+    inputs = processor(audio, return_tensors="pt", padding=True).to(device)
     
-    if 'segments' in result:
-        transcription = " ".join([segment['text'] for segment in result['segments']])
-        return transcription
-    else:
-        raise ValueError("No transcription segments found.")
+    model.eval()
+    with torch.no_grad():
+        logits = model(input_values=inputs["input_values"]).logits
+    
+    predicted_ids = torch.argmax(logits, dim=-1)
+    transcription = processor.decode(predicted_ids[0])
+    return transcription
 
 @app.post("/filter_transcribe/")
 async def transcribe_audio(
@@ -126,23 +139,25 @@ async def transcribe_audio(
     logging.info(f"Detected language: {detected_language}")
 
     # Determine model to use based on the detected language
-    if detected_language == 'ml':  # 'ml' is the code for Malayalam
-        logging.info("Using WhisperX model for Malayalam transcription.")
+    transcription = None
+    if detected_language == 'ml':  # Malayalam
         model = whisperx_model
+    elif detected_language == 'fa':  # Persian
+        transcription = transcribe_with_wav2vec(temp_file_path, persian_processor, persian_model)
+    elif detected_language == 'mt':  # Maltese
+        transcription = transcribe_with_wav2vec(temp_file_path, maltese_processor, maltese_model)
     else:
-        logging.info("Using default Whisper model for transcription.")
-        model = whisper_model
+        model = whisper_model  # Use default Whisper model if language doesn't match above
 
-    # Process the file and get the transcription
-    if file_size_mb > CHUNK_SIZE_MB:
-        logging.info("Processing file in chunks...")
-        transcription = await process_audio_in_chunks(temp_file_path, model)
-    else:
-        logging.info("Processing entire file...")
-        transcription = process_full_audio(temp_file_path, model)
+    # Process the file and get the transcription only if transcription is not already set
+    if transcription is None:
+        if file_size_mb > CHUNK_SIZE_MB:
+            transcription = await process_audio_in_chunks(temp_file_path, model)
+        else:
+            transcription = process_full_audio(temp_file_path, model)
 
     # Cache the result
-    cache[cache_key] = transcription  # Fix here: use dictionary assignment
+    cache[cache_key] = transcription
 
     # Clean up the temporary file
     os.remove(temp_file_path)
