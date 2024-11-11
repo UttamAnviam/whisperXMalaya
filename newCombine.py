@@ -8,7 +8,7 @@ import whisper
 import whisperx
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.responses import JSONResponse
-from pydub import AudioSegment
+from pydub import AudioSegment,silence
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 import librosa
 
@@ -29,7 +29,7 @@ CHUNK_LENGTH_MS = 60 * 1000  # 60 seconds per chunk
 EXPECTED_TOKEN = "dummytoken123"
 
 # Load models
-whisper_model = whisper.load_model("tiny").to(device)
+whisper_model = whisper.load_model("medium").to(device)
 whisperx_model = whisperx.load_model("kurianbenoy/vegam-whisper-medium-ml", device, compute_type="float32")
 persian_processor = Wav2Vec2Processor.from_pretrained("jonatasgrosman/wav2vec2-large-xlsr-53-persian")
 persian_model = Wav2Vec2ForCTC.from_pretrained("jonatasgrosman/wav2vec2-large-xlsr-53-persian").to(device)
@@ -47,11 +47,14 @@ def get_file_hash(file_path):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
 
+
 async def save_audio_file(file: UploadFile, temp_file_path: str):
     """ Asynchronously save the uploaded audio file to a temporary file. """
     async with aiofiles.open(temp_file_path, 'wb') as audio_file:
         content = await file.read()
         await audio_file.write(content)
+
+
 
 async def transcribe_chunk_async(audio_chunk, chunk_path, model):
     """ Asynchronously transcribe a chunk of audio. """
@@ -60,7 +63,13 @@ async def transcribe_chunk_async(audio_chunk, chunk_path, model):
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, lambda: model.transcribe(chunk_path))
     os.remove(chunk_path)  # Clean up temporary file
+    
+    # Handle cases where no speech is detected
+    if not result['text'].strip():
+        logging.warning(f"No active speech detected in chunk: {chunk_path}")
+        return "[No speech detected]"
     return result['text']
+
 
 async def process_audio_in_chunks(file_path, model):
     """ Process large audio files in chunks asynchronously. """
@@ -152,12 +161,26 @@ async def process_audio_with_multiple_languages(file_path):
         chunk_path = chunk_path_template.format(i)
         tasks.append(transcribe_chunk_based_on_language(audio_chunk, chunk_path))
 
-    # Gather results asynchronously
     results = await asyncio.gather(*tasks)
     
-    # Combine the transcriptions
-    transcription = " ".join(results)
+    # Filter out any "[No speech detected]" placeholders
+    meaningful_results = [result for result in results if result != "[No speech detected]"]
+
+    if not meaningful_results:
+        return "No active speech detected in the entire audio."
+    
+    transcription = " ".join(meaningful_results)
     return transcription
+
+
+
+def has_active_speech(file_path):
+    """ Detects if the audio contains any active speech by checking for non-silent segments. """
+    audio = AudioSegment.from_file(file_path)
+    non_silent_segments = silence.detect_nonsilent(audio, min_silence_len=1000, silence_thresh=-40)
+    return len(non_silent_segments) > 0
+
+
 
 @app.post("/filter_transcribe/")
 async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(None)):
@@ -170,9 +193,11 @@ async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(N
     temp_file_path = f"/tmp/{file.filename}"
     await save_audio_file(file, temp_file_path)
 
-    # Check file size (convert bytes to MB)
-    file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
-    logging.info(f"Uploaded file size: {file_size_mb:.2f} MB")
+    # Check for active speech
+    if not has_active_speech(temp_file_path):
+        logging.info("No active speech found in audio; stopping process.")
+        os.remove(temp_file_path)  # Clean up the temporary file
+        return  # Stop the process without returning any response
 
     # Check cache before processing
     file_hash = get_file_hash(temp_file_path)
@@ -181,6 +206,7 @@ async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(N
 
     if cached_transcription:
         logging.info("Returning cached transcription.")
+        os.remove(temp_file_path)  # Clean up the temporary file
         return JSONResponse(content={"transcription": cached_transcription})
 
     # Process the file and get the transcription
@@ -194,6 +220,8 @@ async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(N
 
     # Return the transcription result
     return JSONResponse(content={"transcription": transcription})
+
+
 
 
 @app.get("/")
