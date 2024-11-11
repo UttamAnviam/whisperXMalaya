@@ -5,3 +5,6 @@ curl -X 'POST'   'http://127.0.0.1:8000/filter_transcribe/'   -H 'x-token:dummyt
 
 #### For Pharshi Audio 
 curl -X POST "http://127.0.0.1:8000/transcribe" -F "file=@/path/to/your/pharshi.mp3"
+
+
+curl -X 'POST'   'http://3.29.104.42:8000/filter_transcribe/'   -H 'x-token:dummytoken123'   -F 'file=@/home/asus107/whisperXMalaya/rick english to english.mp3'

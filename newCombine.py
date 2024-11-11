@@ -183,13 +183,8 @@ async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(N
         logging.info("Returning cached transcription.")
         return JSONResponse(content={"transcription": cached_transcription})
 
-    # If the file size is greater than 20MB, process it in chunks
-    if file_size_mb > 20:
-        logging.info("File size is greater than 20MB, processing in chunks.")
-        transcription = await process_audio_with_multiple_languages(temp_file_path)
-    else:
-        logging.info("File size is 20MB or smaller, processing as a whole.")
-        transcription = await process_full_audio(temp_file_path, whisper_model)
+    # Process the file and get the transcription
+    transcription = await process_audio_with_multiple_languages(temp_file_path)
 
     # Cache the result
     cache[cache_key] = transcription
