@@ -9,7 +9,6 @@ import whisperx
 from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.responses import JSONResponse
 from pydub import AudioSegment
-from concurrent.futures import ThreadPoolExecutor
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 import librosa
 
@@ -105,11 +104,64 @@ def transcribe_with_wav2vec(file_path, processor, model):
     transcription = processor.decode(predicted_ids[0])
     return transcription
 
+async def detect_language_for_chunk(audio_chunk_path):
+    """Detect language for a given audio chunk using WhisperX or another model."""
+    audio = whisperx.load_audio(audio_chunk_path)
+    language_detection_result = whisperx_model.transcribe(audio, batch_size=4)
+    return language_detection_result['language']
+
+async def transcribe_chunk_based_on_language(audio_chunk, chunk_path):
+    """Transcribe a chunk based on detected language."""
+    # Save the audio chunk to a temporary file
+    audio_chunk.export(chunk_path, format="wav")
+    
+    # Detect language for the chunk
+    detected_language = await detect_language_for_chunk(chunk_path)
+    logging.info(f"Detected language for chunk: {detected_language}")
+
+    # Select the model based on the detected language
+    if detected_language == 'en':  # English
+        model = whisper_model
+    elif detected_language == 'mt':  # Maltese
+        model = maltese_model
+    elif detected_language == 'fa':  # Persian (as an example for another language)
+        model = persian_model
+    else:
+        model = whisper_model  # Default to Whisper for unknown languages
+    
+    # Transcribe the audio chunk
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: model.transcribe(chunk_path))
+    
+    os.remove(chunk_path)  # Clean up temporary file
+    return result['text']
+
+async def process_audio_with_multiple_languages(file_path):
+    """Process the audio file in chunks and transcribe based on language."""
+    audio = AudioSegment.from_file(file_path)
+    total_length_ms = len(audio)
+    transcription = []
+
+    chunk_path_template = "/tmp/temp_chunk_{}.wav"
+    tasks = []
+
+    for i in range(0, total_length_ms, CHUNK_LENGTH_MS):
+        chunk_start = i
+        chunk_end = min(i + CHUNK_LENGTH_MS, total_length_ms)
+        audio_chunk = audio[chunk_start:chunk_end]
+        chunk_path = chunk_path_template.format(i)
+        tasks.append(transcribe_chunk_based_on_language(audio_chunk, chunk_path))
+
+    # Gather results asynchronously
+    results = await asyncio.gather(*tasks)
+    
+    # Combine the transcriptions
+    transcription = " ".join(results)
+    return transcription
+
 @app.post("/filter_transcribe/")
-async def transcribe_audio(
-    file: UploadFile = File(...), 
-    x_token: str = Header(None)  # Custom header for token
-):
+async def transcribe_audio(file: UploadFile = File(...), x_token: str = Header(None)):
+    """Main function to handle the uploaded audio and detect multiple languages."""
     # Validate token
     if x_token != EXPECTED_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid token")
@@ -131,30 +183,13 @@ async def transcribe_audio(
         logging.info("Returning cached transcription.")
         return JSONResponse(content={"transcription": cached_transcription})
 
-    # Detect language using whisperx or whisper
-    audio = whisperx.load_audio(temp_file_path)
-    language_detection_result = whisperx_model.transcribe(audio, batch_size=4)
-    detected_language = language_detection_result['language']
-
-    logging.info(f"Detected language: {detected_language}")
-
-    # Determine model to use based on the detected language
-    transcription = None
-    if detected_language == 'ml':  # Malayalam
-        model = whisperx_model
-    elif detected_language == 'fa':  # Persian
-        transcription = transcribe_with_wav2vec(temp_file_path, persian_processor, persian_model)
-    elif detected_language == 'mt':  # Maltese
-        transcription = transcribe_with_wav2vec(temp_file_path, maltese_processor, maltese_model)
+    # If the file size is greater than 20MB, process it in chunks
+    if file_size_mb > 20:
+        logging.info("File size is greater than 20MB, processing in chunks.")
+        transcription = await process_audio_with_multiple_languages(temp_file_path)
     else:
-        model = whisper_model  # Use default Whisper model if language doesn't match above
-
-    # Process the file and get the transcription only if transcription is not already set
-    if transcription is None:
-        if file_size_mb > CHUNK_SIZE_MB:
-            transcription = await process_audio_in_chunks(temp_file_path, model)
-        else:
-            transcription = process_full_audio(temp_file_path, model)
+        logging.info("File size is 20MB or smaller, processing as a whole.")
+        transcription = await process_full_audio(temp_file_path, whisper_model)
 
     # Cache the result
     cache[cache_key] = transcription
@@ -164,6 +199,7 @@ async def transcribe_audio(
 
     # Return the transcription result
     return JSONResponse(content={"transcription": transcription})
+
 
 @app.get("/")
 def read_root():

@@ -41,6 +41,6 @@ def transcribe_audio(file_path):
     return transcription
 
 # Example: transcribe an audio file
-file_path = "maltese-re.mp3"  # Replace with your file path
+file_path = "MalteseEngilsh.wav"  # Replace with your file path
 transcription = transcribe_audio(file_path)
 print("Transcription: ", transcription)
