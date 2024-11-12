@@ -17,7 +17,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 logging.info(f"Using device: {device}")
 
 # Load the Whisper model
-model = whisper.load_model("tiny").to(device)
+model = whisper.load_model("medium").to(device)
 
 # Constants for chunking
 CHUNK_SIZE_MB = 25  # Maximum file size in MB before chunking
