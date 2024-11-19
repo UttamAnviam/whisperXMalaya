@@ -9,6 +9,7 @@ from transformers import pipeline
 from tempfile import NamedTemporaryFile
 import asyncio
 import httpx
+import whisper
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +33,7 @@ pipeline_model = None
 def load_models():
     global whisper_model, pipeline_model
     logging.info("Loading models...")
-    whisper_model = torch.hub.load("openai/whisper", "medium").to(device)
+    whisper_model = whisper.load_model("openai/whisper", "medium").to(device)
 
     pipeline_model = pipeline(
         task="automatic-speech-recognition",
