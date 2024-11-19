@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from transformers import pipeline
 from tempfile import NamedTemporaryFile
 import time
-
+import requests
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
@@ -182,22 +182,31 @@ def process_full_audio_whisper(file_path):
     return result['text'], result['language'], result['segments']
 
 @app.post("/transcribe/")
-async def transcribe_audio(
-    file: UploadFile = File(...),
+async def download_and_transcribe(
+    url: str = Form(...),
     x_token: str = Header(None)
 ):
     # Validate token
     if x_token != EXPECTED_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid token")
-
-    # Save uploaded file temporarily
-    temp_file_path = f"/tmp/{file.filename}"
-    with open(temp_file_path, "wb") as audio_file:
-        content = await file.read()
-        audio_file.write(content)
+    
+    # Extract filename from URL
+    filename = url.split("/")[-1]
+    temp_file_path = f"/tmp/{filename}"
 
     try:
-        # Check file size
+        # Download file from the provided URL
+        logging.info(f"Downloading file from URL: {url}")
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download file")
+
+        # Save the file temporarily
+        with open(temp_file_path, "wb") as file:
+            file.write(response.content)
+        logging.info(f"File downloaded and saved to {temp_file_path}")
+
+        # Process the file using the existing transcription method
         file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
         logging.info(f"File size: {file_size_mb:.2f} MB")
 
@@ -212,22 +221,31 @@ async def transcribe_audio(
             else:
                 transcription, language, segments = process_full_audio_whisper(temp_file_path)
 
+        # Return the transcription results as a downloadable URL
         return JSONResponse(content={
             "results": [{
-                "filename": file.filename,
+                "filename": filename,
                 "transcript": {
                     "text": transcription,
                     "segments": segments,
                     "language": language
-                }
+                },
+                "download_url": f"https://process-audio.healthorbit.ai/transcribe/?url={url}"
             }]
         })
 
+    except Exception as e:
+        logging.error(f"Error during download and transcription: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
     finally:
         # Clean up temporary file
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-
 @app.get("/")
 def read_root():
     return {"message": "Whisper Transcription API"}
+
+
+
+
