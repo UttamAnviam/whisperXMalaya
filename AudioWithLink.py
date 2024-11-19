@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse
 import whisper
 import os
@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from transformers import pipeline
 from tempfile import NamedTemporaryFile
 import time
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +20,7 @@ app = FastAPI()
 CHUNK_SIZE_MB = 25  # Maximum file size in MB before using pipeline
 CHUNK_LENGTH_MS = 60 * 1000  # 60 seconds per chunk
 EXPECTED_TOKEN = "NgPEbNQnZrKDtRwfaIrBmnryRQZITFhm"
+AUDIO_URL = "https://api.healthorbit.ai/api/v1/audio-file/ho_audio_672b609ca55b3_1730896028_converted.mp3"
 
 # Initialize models
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -138,13 +140,18 @@ def process_audio_pipeline(file_path):
     
     return " ".join(transcriptions), "en", segments
 
-def transcribe_chunk_whisper(audio_chunk, chunk_path):
-    """Transcribe a chunk using the standard Whisper model."""
-    audio_chunk.export(chunk_path, format="wav")
-    logging.info(f"Transcribing chunk with Whisper: {chunk_path}")
-    result = whisper_model.transcribe(chunk_path)
-    os.remove(chunk_path)
-    return result['text'], result['language'], result['segments']
+def transcribe_chunk_whisper(chunk_path):
+    try:
+        logging.info(f"Transcribing chunk: {chunk_path}")
+        result = whisper_model.transcribe(chunk_path)
+        return result['text'], result['language'], result['segments']
+    except RuntimeError as e:
+        logging.error(f"Runtime error while processing chunk {chunk_path}: {str(e)}")
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error while processing chunk {chunk_path}: {str(e)}")
+        raise
+
 
 def process_audio_whisper_chunks(file_path):
     """Process audio in chunks using the standard Whisper model."""
@@ -163,7 +170,9 @@ def process_audio_whisper_chunks(file_path):
             chunk_end = min(i + CHUNK_LENGTH_MS, total_length_ms)
             audio_chunk = audio[chunk_start:chunk_end]
             chunk_path = chunk_path_template.format(i)
-            futures.append(executor.submit(transcribe_chunk_whisper, audio_chunk, chunk_path))
+            audio_chunk.export(chunk_path, format="wav")  # Export chunk to a file
+            
+            futures.append(executor.submit(transcribe_chunk_whisper, chunk_path))
             
         for future in futures:
             text, lang, segs = future.result()
@@ -176,27 +185,34 @@ def process_audio_whisper_chunks(file_path):
             
     return transcription.strip(), language, segments
 
+
 def process_full_audio_whisper(file_path):
     """Process entire audio file using standard Whisper model."""
     result = whisper_model.transcribe(file_path)
     return result['text'], result['language'], result['segments']
 
+def download_audio(url):
+    """Download audio from a URL and save it temporarily."""
+    response = requests.get(url)
+    if response.status_code == 200:
+        temp_file_path = "/tmp/temp_audio.mp3"
+        with open(temp_file_path, "wb") as file:
+            file.write(response.content)
+        return temp_file_path
+    else:
+        raise HTTPException(status_code=400, detail="Failed to download audio file")
+
 @app.post("/transcribe/")
-async def transcribe_audio(
-    file: UploadFile = File(...),
-    x_token: str = Header(None)
-):
+async def transcribe_audio(x_token: str = Header(None)):
     # Validate token
     if x_token != EXPECTED_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid token")
 
-    # Save uploaded file temporarily
-    temp_file_path = f"/tmp/{file.filename}"
-    with open(temp_file_path, "wb") as audio_file:
-        content = await file.read()
-        audio_file.write(content)
-
     try:
+        # Download the audio file
+        temp_file_path = download_audio(AUDIO_URL)
+        logging.info(f"Downloaded audio file to {temp_file_path}")
+
         # Check file size
         file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
         logging.info(f"File size: {file_size_mb:.2f} MB")
@@ -214,7 +230,7 @@ async def transcribe_audio(
 
         return JSONResponse(content={
             "results": [{
-                "filename": file.filename,
+                "filename": "Downloaded audio",
                 "transcript": {
                     "text": transcription,
                     "segments": segments,
@@ -231,5 +247,3 @@ async def transcribe_audio(
 @app.get("/")
 def read_root():
     return {"message": "Whisper Transcription API"}
-
-
