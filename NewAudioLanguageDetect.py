@@ -33,7 +33,7 @@ pipeline_model = None
 def load_models():
     global whisper_model, pipeline_model
     logging.info("Loading models...")
-    whisper_model = whisper.load_model("openai/whisper", "medium").to(device)
+    whisper_model = whisper.load_model("medium").to(device)
 
     pipeline_model = pipeline(
         task="automatic-speech-recognition",
