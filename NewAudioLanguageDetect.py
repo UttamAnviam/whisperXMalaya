@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header,Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Form
 from fastapi.responses import JSONResponse
 import whisper
 import os
@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from transformers import pipeline
 from tempfile import NamedTemporaryFile
 import time
+import requests
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -121,17 +122,24 @@ def transcribe_chunk_pipeline(chunk_path):
         return None
 
 def process_audio_pipeline(file_path):
-    """Process large audio files using the pipeline model."""
+    """Process large audio files using the pipeline model with enhanced multithreading."""
     chunks = split_audio_pipeline(file_path)
     chunk_results = []
     transcriptions = []
     
+    # Enhanced multithreading with max_workers=4
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(transcribe_chunk_pipeline, chunk) for chunk in chunks]
+        
+        for future in futures:
+            result = future.result()
+            if result:
+                chunk_results.append(result)
+                transcriptions.append(result.get('text', ''))
+    
+    # Clean up chunks
     for chunk in chunks:
-        result = transcribe_chunk_pipeline(chunk)
-        if result:
-            chunk_results.append(result)
-            transcriptions.append(result.get('text', ''))
-        os.remove(chunk)  # Clean up
+        os.remove(chunk)
     
     # Create segments from all chunks
     segments = create_segments_from_chunks(chunk_results)
@@ -147,14 +155,15 @@ def transcribe_chunk_whisper(audio_chunk, chunk_path):
     return result['text'], result['language'], result['segments']
 
 def process_audio_whisper_chunks(file_path):
-    """Process audio in chunks using the standard Whisper model."""
+    """Process audio in chunks using the standard Whisper model with enhanced multithreading."""
     audio = AudioSegment.from_file(file_path)
     total_length_ms = len(audio)
     transcription = ""
     language = None
     segments = []
     
-    with ThreadPoolExecutor() as executor:
+    # Enhanced multithreading with max_workers=4
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         chunk_path_template = "/tmp/temp_chunk_{}.wav"
         
@@ -181,24 +190,32 @@ def process_full_audio_whisper(file_path):
     result = whisper_model.transcribe(file_path)
     return result['text'], result['language'], result['segments']
 
-
 @app.post("/transcribe/")
-async def transcribe_audio(
-    file: UploadFile = File(...),
+async def download_and_transcribe(
+    url: str = Form(...),
     x_token: str = Header(None)
 ):
     # Validate token
     if x_token != EXPECTED_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid token")
-
-    # Save uploaded file temporarily
-    temp_file_path = f"/tmp/{file.filename}"
-    with open(temp_file_path, "wb") as audio_file:
-        content = await file.read()
-        audio_file.write(content)
+    
+    # Extract filename from URL
+    filename = url.split("/")[-1]
+    temp_file_path = f"/tmp/{filename}"
 
     try:
-        # Check file size
+        # Download file from the provided URL
+        logging.info(f"Downloading file from URL: {url}")
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download file")
+
+        # Save the file temporarily
+        with open(temp_file_path, "wb") as file:
+            file.write(response.content)
+        logging.info(f"File downloaded and saved to {temp_file_path}")
+
+        # Process the file using the existing transcription method
         file_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
         logging.info(f"File size: {file_size_mb:.2f} MB")
 
@@ -213,20 +230,23 @@ async def transcribe_audio(
             else:
                 transcription, language, segments = process_full_audio_whisper(temp_file_path)
 
-        # Create response with both English and detected language transcriptions
-        response = {
+        # Return the transcription results as a downloadable URL
+        return JSONResponse(content={
             "results": [{
-                "filename": file.filename,
+                "filename": filename,
                 "transcript": {
-                    "english": transcription,
-                    "detected_language": language,
-                    "segments": segments
-                }
+                    "text": transcription,
+                    "segments": segments,
+                    "language": language
+                },
+                "download_url": f"https://process-audio.healthorbit.ai/transcribe/?url={url}"
             }]
-        }
+        })
 
-        return JSONResponse(content=response)
-
+    except Exception as e:
+        logging.error(f"Error during download and transcription: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
     finally:
         # Clean up temporary file
         if os.path.exists(temp_file_path):
