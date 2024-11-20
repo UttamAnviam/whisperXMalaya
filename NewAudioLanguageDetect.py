@@ -50,7 +50,7 @@ executor = ThreadPoolExecutor()
 
 
 # Utility Functions
-def split_audio_pipeline(file_path, chunk_duration_ms=180000):
+async def split_audio_pipeline(file_path, chunk_duration_ms=180000):
     """Split audio into fixed-size chunks for pipeline processing."""
     audio = AudioSegment.from_file(file_path)
     chunks = []
@@ -90,7 +90,7 @@ async def process_audio_pipeline_async(file_path):
     return " ".join(transcriptions), "en", []  # Segments can be populated if needed
 
 
-def transcribe_whisper_sync(file_path):
+async def transcribe_whisper_sync(file_path):
     """Synchronous transcription using Whisper."""
     result = whisper_model.transcribe(file_path)
     return result['text'], result['language'], result['segments']
